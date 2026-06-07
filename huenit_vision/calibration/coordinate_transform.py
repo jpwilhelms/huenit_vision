@@ -25,6 +25,7 @@ class CoordinateTransform:
     def __init__(self) -> None:
         self.M_pixel_to_robot: np.ndarray | None = None  # shape (2,3)
         self.M_robot_to_pixel: np.ndarray | None = None
+        self.z_plane_coeffs: List[float] | None = None
 
     # ---------------------------------------------------------------------
     def fit_from_grid_data(self, grid_data: Dict[str, Dict[str, Any]]) -> None:
@@ -56,6 +57,23 @@ class CoordinateTransform:
         self.M_pixel_to_robot = M_pr
         self.M_robot_to_pixel = M_rp
         logger.info("Affine transformation matrices fitted")
+
+        # Versuche Z-Ebene zu berechnen
+        A_z = []
+        z_vals = []
+        for entry in grid_data.values():
+            robot = entry.get("robot")
+            z_val = entry.get("robot_z")
+            if robot is not None and z_val is not None:
+                A_z.append([robot[0], robot[1], 1.0])
+                z_vals.append(z_val)
+        
+        if len(z_vals) >= 3:
+            A_z = np.array(A_z)
+            z_vals = np.array(z_vals)
+            coeffs, _, _, _ = np.linalg.lstsq(A_z, z_vals, rcond=None)
+            self.z_plane_coeffs = [float(coeffs[0]), float(coeffs[1]), float(coeffs[2])]
+            logger.info(f"Z-Plane coefficients fitted: {self.z_plane_coeffs}")
 
     # ---------------------------------------------------------------------
     def _apply(self, M: np.ndarray, pts: np.ndarray) -> np.ndarray:
@@ -100,6 +118,7 @@ class CoordinateTransform:
         data = {
             "M_pixel_to_robot": self.M_pixel_to_robot.tolist() if self.M_pixel_to_robot is not None else None,
             "M_robot_to_pixel": self.M_robot_to_pixel.tolist() if self.M_robot_to_pixel is not None else None,
+            "z_plane_coeffs": self.z_plane_coeffs if hasattr(self, "z_plane_coeffs") else None,
         }
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -111,4 +130,13 @@ class CoordinateTransform:
             data = json.load(f)
         self.M_pixel_to_robot = np.array(data["M_pixel_to_robot"]) if data["M_pixel_to_robot"] is not None else None
         self.M_robot_to_pixel = np.array(data["M_robot_to_pixel"]) if data["M_robot_to_pixel"] is not None else None
+        self.z_plane_coeffs = data.get("z_plane_coeffs", None)
         logger.info(f"CoordinateTransform loaded from {path}")
+
+    def get_table_z(self, x: float, y: float) -> float:
+        """Berechnet die kalibrierte Tischhoehe Z an Position (X, Y) via Z-Ebene."""
+        if hasattr(self, "z_plane_coeffs") and self.z_plane_coeffs is not None:
+            a, b, c = self.z_plane_coeffs
+            return a * x + b * y + c
+        logger.warning("Z-Ebenen-Koeffizienten nicht geladen, verwende Fallback Z=-41.1")
+        return -41.1

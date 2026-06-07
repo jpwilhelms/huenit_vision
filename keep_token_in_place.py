@@ -99,15 +99,19 @@ def main() -> None:
             return False
 
     def perform_pick(cx: float, cy: float) -> float:
-        # Dynamische Suche ab Z=-39.0 bis Z=-46.0
-        z_ref_base = -39.0
-        logger.info(f"Starte Pick-Suche an X={cx:.2f}, Y={cy:.2f}...")
-        z_try = z_ref_base
+        # Z-Tischhoehe aus der Z-Kalibrierung (Ebene)
+        z_table = transform.get_table_z(cx, cy)
+        # Z-Suche eingrenzen auf z_table + 1.0 bis z_table - 1.5 mm
+        z_start = round(z_table + 1.0, 1)
+        z_end = round(z_table - 1.5, 1)
+        logger.info(f"Starte kalibrierte Pick-Suche an X={cx:.2f}, Y={cy:.2f} (geschaetzte Tisch-Z: {z_table:.2f} mm, Suche: {z_start} bis {z_end})...")
+        z_try = z_start
         
-        while z_try >= -46.0:
+        while z_try >= z_end:
             logger.info(f"Fahre fuer Pick auf Z={z_try:.2f} mm...")
-            conn.move(cx, cy, z_travel, cfg.feed_travel)
-            if not verify_reached(cx, cy, z_travel):
+            z_travel_local = z_table + cfg.z_travel_offset
+            conn.move(cx, cy, z_travel_local, cfg.feed_travel)
+            if not verify_reached(cx, cy, z_travel_local):
                 raise RuntimeError(f"Reisehoehe ueber Zielpunkt nicht erreicht.")
             
             conn.move(cx, cy, z_try, cfg.feed_vertical)
@@ -142,22 +146,27 @@ def main() -> None:
             
         raise RuntimeError("Pick fehlgeschlagen: Suchbereich erschoepft oder Token entwendet.")
 
-    def perform_place(tx: float, ty: float, z_target: float) -> bool:
-        logger.info(f"Platziere Token bei X={tx:.1f}, Y={ty:.1f}, Z={z_target:.2f}...")
-        conn.move(tx, ty, z_travel, cfg.feed_travel)
-        if not verify_reached(tx, ty, z_travel):
+    def perform_place(tx: float, ty: float) -> bool:
+        # Z-Tischhoehe an der Zielposition aus der Z-Kalibrierung (Ebene)
+        z_table = transform.get_table_z(tx, ty)
+        z_travel_local = z_table + cfg.z_travel_offset
+        z_place_local = z_table + cfg.z_place_offset
+        
+        logger.info(f"Platziere Token bei X={tx:.1f}, Y={ty:.1f}, Z={z_place_local:.2f}...")
+        conn.move(tx, ty, z_travel_local, cfg.feed_travel)
+        if not verify_reached(tx, ty, z_travel_local):
             logger.warning(f"Reisehoehe ueber Ablagepunkt ({tx:.1f}, {ty:.1f}) nicht erreichbar.")
             return False
             
-        conn.move(tx, ty, z_target + cfg.z_place_offset, cfg.feed_vertical)
-        if not verify_reached(tx, ty, z_target + cfg.z_place_offset):
+        conn.move(tx, ty, z_place_local, cfg.feed_vertical)
+        if not verify_reached(tx, ty, z_place_local):
             logger.warning(f"Ablagehoehe bei ({tx:.1f}, {ty:.1f}) nicht erreichbar.")
-            conn.move(tx, ty, z_travel, cfg.feed_vertical)
+            conn.move(tx, ty, z_travel_local, cfg.feed_vertical)
             return False
         
         conn.vacuum_off(blow_off=True)
         time.sleep(cfg.vacuum_release_time)
-        conn.move(tx, ty, z_travel, cfg.feed_vertical)
+        conn.move(tx, ty, z_travel_local, cfg.feed_vertical)
         return True
 
     # Setup Visual Servoing
@@ -245,7 +254,7 @@ def main() -> None:
                             logger.info("Token gegriffen. Bringe es zur Ursprungsposition zurueck...")
 
                             # Token ablegen
-                            perform_place(x_start, y_start, z_start_success)
+                            perform_place(x_start, y_start)
                             logger.info("Token wieder an der Ursprungsposition platziert.")
 
                         except Exception as e:
