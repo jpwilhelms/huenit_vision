@@ -67,3 +67,4 @@ Thumbs.db
 
 # Calibration result data (large images/results)
 calib_results/
+workspace_map.json
