@@ -101,9 +101,9 @@ def main() -> None:
     def perform_pick(cx: float, cy: float) -> float:
         # Z-Tischhoehe aus der Z-Kalibrierung (Ebene)
         z_table = transform.get_table_z(cx, cy)
-        # Z-Suche eingrenzen auf z_table + 1.0 bis z_table - 1.5 mm
+        # Z-Suche eingrenzen auf z_table + 1.0 bis z_table - 2.5 mm (erlaubt 1mm tieferes Greifen)
         z_start = round(z_table + 1.0, 1)
-        z_end = round(z_table - 1.5, 1)
+        z_end = round(z_table - 2.5, 1)
         logger.info(f"Starte kalibrierte Pick-Suche an X={cx:.2f}, Y={cy:.2f} (geschaetzte Tisch-Z: {z_table:.2f} mm, Suche: {z_start} bis {z_end})...")
         z_try = z_start
         
@@ -195,73 +195,86 @@ def main() -> None:
 
         # 3. Ueberwachungs-Schleife
         logger.info("Ueberwachung aktiv. Verschiebe das Token, um die Rueckfuehrung zu testen.")
+        in_park = False
         while True:
-            # Stelle sicher, dass der Arm in Parkposition ist
-            curr_pos = conn.get_position()
-            if abs(curr_pos[0] - cfg.park_x) > 5.0 or abs(curr_pos[1] - cfg.park_y) > 5.0:
-                logger.info("Fahre in Parkposition...")
-                conn.move(cfg.park_x, cfg.park_y, z_travel, cfg.feed_travel)
-                time.sleep(cfg.camera_settle_time)
-
             # Deckenkamera scannen
             frame = cameras.capture_overhead()
+            p_cam = None
             if frame is not None:
                 p_cam = detect_marker_0(frame)
-                if p_cam is not None:
-                    x_curr, y_curr = transform.pixel_to_robot(p_cam[0], p_cam[1])
-                    dist = math.hypot(x_curr - x_start, y_curr - y_start)
+                
+            if p_cam is not None:
+                x_curr, y_curr = transform.pixel_to_robot(p_cam[0], p_cam[1])
+                dist = math.hypot(x_curr - x_start, y_curr - y_start)
 
-                    # Wenn das Token um mehr als 12.0 mm verschoben wurde
-                    if dist > 12.0:
-                        logger.info(f"Token verschoben! Abweichung: {dist:.1f} mm. Aktuelle Position: X={x_curr:.2f}, Y={y_curr:.2f}")
+                # Wenn das Token um mehr als 12.0 mm verschoben wurde
+                if dist > 12.0:
+                    logger.info(f"Token verschoben! Abweichung: {dist:.1f} mm. Aktuelle Position: X={x_curr:.2f}, Y={y_curr:.2f}")
+                    
+                    try:
+                        # Pruefe Erreichbarkeit
+                        if not check_reachable(x_curr, y_curr, z_start_success):
+                            logger.warning(f"Position ({x_curr:.1f}, {y_curr:.1f}) liegt ausserhalb des Arbeitsraums.")
+                            time.sleep(1.0)
+                            continue
+
+                        # Annaeherung auf Lesehoehe zur Feinjustierung (direkt von der aktuellen Position!)
+                        logger.info("Fahre zur Feinjustierung ueber das verschobene Token...")
+                        adjusted = servoing.fine_adjust(x_curr, y_curr)
                         
-                        try:
-                            # Pruefe Erreichbarkeit
-                            if not check_reachable(x_curr, y_curr, z_start_success):
-                                logger.warning(f"Position ({x_curr:.1f}, {y_curr:.1f}) liegt ausserhalb des Arbeitsraums.")
-                                time.sleep(1.0)
-                                continue
+                        if adjusted is None:
+                            logger.warning("Feinjustierung abgebrochen: Token waehrend der Bewegung entfernt/verschoben.")
+                            in_park = False
+                            continue
 
-                            # Annaeherung auf Lesehoehe zur Feinjustierung
-                            logger.info("Fahre zur Feinjustierung ueber das verschobene Token...")
-                            adjusted = servoing.fine_adjust(x_curr, y_curr)
-                            
-                            if adjusted is None:
-                                logger.warning("Feinjustierung abgebrochen: Token waehrend der Bewegung entfernt/verschoben.")
-                                continue
+                        x_adj, y_adj = adjusted
 
-                            x_adj, y_adj = adjusted
+                        # Verifikation vor dem Pick: Liegt das Token noch korrekt?
+                        time.sleep(cfg.camera_settle_time)
+                        verify_frame = cameras.capture_hand()
+                        if verify_frame is None:
+                            raise RuntimeError("Kein Bild von Handkamera zur Verifikation.")
+                        
+                        p_verify = detect_marker_0(verify_frame)
+                        if p_verify is None:
+                            raise RuntimeError("Token waehrend der Verifikation verschwunden.")
 
-                            # Verifikation vor dem Pick: Liegt das Token noch korrekt?
-                            time.sleep(cfg.camera_settle_time)
-                            verify_frame = cameras.capture_hand()
-                            if verify_frame is None:
-                                raise RuntimeError("Kein Bild von Handkamera zur Verifikation.")
-                            
-                            p_verify = detect_marker_0(verify_frame)
-                            if p_verify is None:
-                                raise RuntimeError("Token waehrend der Verifikation verschwunden.")
+                        err_u = p_verify[0] - final_pixel[0]
+                        err_v = p_verify[1] - final_pixel[1]
+                        dist_px = math.hypot(err_u, err_v)
+                        
+                        if dist_px > 8.0:
+                            raise RuntimeError(f"Token wurde waehrend der Annaeherung bewegt (Pixelabweichung: {dist_px:.1f}px).")
 
-                            err_u = p_verify[0] - final_pixel[0]
-                            err_v = p_verify[1] - final_pixel[1]
-                            dist_px = math.hypot(err_u, err_v)
-                            
-                            if dist_px > 8.0:
-                                raise RuntimeError(f"Token wurde waehrend der Annaeherung bewegt (Pixelabweichung: {dist_px:.1f}px).")
+                        # Token aufnehmen
+                        perform_pick(x_adj, y_adj)
+                        logger.info("Token gegriffen. Bringe es zur Ursprungsposition zurueck...")
 
-                            # Token aufnehmen
-                            perform_pick(x_adj, y_adj)
-                            logger.info("Token gegriffen. Bringe es zur Ursprungsposition zurueck...")
+                        # Token ablegen
+                        perform_place(x_start, y_start)
+                        logger.info("Token wieder an der Ursprungsposition platziert.")
+                        in_park = False
 
-                            # Token ablegen
-                            perform_place(x_start, y_start)
-                            logger.info("Token wieder an der Ursprungsposition platziert.")
-
-                        except Exception as e:
-                            logger.error(f"Fehler bei Rueckfuehrung: {e}")
-                            logger.info("Fahre in Sicherheitsposition und schalte Vakuum ab...")
-                            conn.vacuum_off(blow_off=False)
-                            conn.move(conn.get_position()[0], conn.get_position()[1], z_travel, cfg.feed_vertical)
+                    except Exception as e:
+                        logger.error(f"Fehler bei Rueckfuehrung: {e}")
+                        logger.info("Fahre in Sicherheitsposition und schalte Vakuum ab...")
+                        conn.vacuum_off(blow_off=False)
+                        curr_pos = conn.get_position()
+                        conn.move(curr_pos[0], curr_pos[1], z_travel, cfg.feed_vertical)
+                        in_park = False
+            else:
+                # Token NICHT gefunden!
+                # Nur parken, wenn wir nicht bereits in Parkposition sind, um freie Sicht zu schaffen
+                curr_pos = conn.get_position()
+                if abs(curr_pos[0] - cfg.park_x) > 5.0 or abs(curr_pos[1] - cfg.park_y) > 5.0:
+                    logger.info("Token nicht detektiert. Fahre in Parkposition zur Sichtfeldfreigabe...")
+                    conn.move(cfg.park_x, cfg.park_y, z_travel, cfg.feed_travel)
+                    time.sleep(cfg.camera_settle_time)
+                    in_park = True
+                else:
+                    if not in_park:
+                        logger.debug("Bereits in Parkposition, warte auf Token-Sichtbarkeit...")
+                        in_park = True
 
             time.sleep(0.5)
 
