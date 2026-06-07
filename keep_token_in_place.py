@@ -179,7 +179,7 @@ def main() -> None:
             if frame is not None:
                 p_cam = detect_marker_0(frame)
                 if p_cam is not None:
-                    x_start, y_start = transform.pixel_to_robot(p_cam)
+                    x_start, y_start = transform.pixel_to_robot(p_cam[0], p_cam[1])
                     logger.info(f"Ursprungsposition erfasst: X={x_start:.2f}, Y={y_start:.2f} (Pixel: {p_cam})")
                     break
             time.sleep(1.0)
@@ -199,7 +199,7 @@ def main() -> None:
             if frame is not None:
                 p_cam = detect_marker_0(frame)
                 if p_cam is not None:
-                    x_curr, y_curr = transform.pixel_to_robot(p_cam)
+                    x_curr, y_curr = transform.pixel_to_robot(p_cam[0], p_cam[1])
                     dist = math.hypot(x_curr - x_start, y_curr - y_start)
 
                     # Wenn das Token um mehr als 12.0 mm verschoben wurde
